@@ -16,9 +16,9 @@ use crate::{
 
 /// Convenience method for removing exclusive access from
 /// a fd and closing it.
-fn close(fd: RawFd) {
+fn close<F: AsRawFd>(fd: F) {
     // remove exclusive access
-    let _ = ioctl::tiocnxcl(fd);
+    let _ = ioctl::tiocnxcl(fd.as_raw_fd());
 
     // On Linux and BSD, we don't need to worry about return
     // type as EBADF means the fd was never open or is already closed
@@ -28,7 +28,7 @@ fn close(fd: RawFd) {
     //
     // close() also should never be retried, and the error code
     // in most cases in purely informative
-    let _ = unistd::close(fd);
+    let _ = unistd::close(fd.as_raw_fd());
 }
 
 /// A serial port implementation for POSIX TTY ports
@@ -59,7 +59,7 @@ fn close(fd: RawFd) {
 /// ```
 #[derive(Debug)]
 pub struct TTYPort {
-    fd: RawFd,
+    fd: i32,
     timeout: Duration,
     exclusive: bool,
     port_name: Option<String>,
@@ -111,7 +111,7 @@ impl TTYPort {
     /// ## Errors
     ///
     /// * `NoDevice` if the device could not be opened. This could indicate that
-    ///    the device is already in use.
+    ///   the device is already in use.
     /// * `InvalidInput` if `path` is not a valid device name.
     /// * `Io` for any other error while opening or initializing the device.
     pub fn open(builder: &SerialPortBuilder) -> Result<TTYPort> {
@@ -119,19 +119,19 @@ impl TTYPort {
         use nix::libc::{cfmakeraw, tcgetattr, tcsetattr};
 
         let path = Path::new(&builder.path);
-        let fd = OwnedFd(nix::fcntl::open(
+        let fd = nix::fcntl::open(
             path,
             OFlag::O_RDWR | OFlag::O_NOCTTY | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
             nix::sys::stat::Mode::empty(),
-        )?);
+        )?;
 
         // Try to claim exclusive access to the port. This is performed even
         // if the port will later be set as non-exclusive, in order to respect
         // other applications that may have an exclusive port lock.
-        ioctl::tiocexcl(fd.0)?;
+        ioctl::tiocexcl(fd.as_raw_fd())?;
 
         let mut termios = MaybeUninit::uninit();
-        nix::errno::Errno::result(unsafe { tcgetattr(fd.0, termios.as_mut_ptr()) })?;
+        nix::errno::Errno::result(unsafe { tcgetattr(fd.as_raw_fd(), termios.as_mut_ptr()) })?;
         let mut termios = unsafe { termios.assume_init() };
 
         // setup TTY for binary serial port access
@@ -143,11 +143,11 @@ impl TTYPort {
         unsafe { cfmakeraw(&mut termios) };
 
         // write settings to TTY
-        unsafe { tcsetattr(fd.0, libc::TCSANOW, &termios) };
+        unsafe { tcsetattr(fd.as_raw_fd(), libc::TCSANOW, &termios) };
 
         // Read back settings from port and confirm they were applied correctly
         let mut actual_termios = MaybeUninit::uninit();
-        unsafe { tcgetattr(fd.0, actual_termios.as_mut_ptr()) };
+        unsafe { tcgetattr(fd.as_raw_fd(), actual_termios.as_mut_ptr()) };
         let actual_termios = unsafe { actual_termios.assume_init() };
 
         if actual_termios.c_iflag != termios.c_iflag
@@ -167,10 +167,10 @@ impl TTYPort {
         }
 
         // clear O_NONBLOCK flag
-        fcntl(fd.0, F_SETFL(nix::fcntl::OFlag::empty()))?;
+        fcntl(&fd, F_SETFL(nix::fcntl::OFlag::empty()))?;
 
         // Configure the low-level port settings
-        let mut termios = termios::get_termios(fd.0)?;
+        let mut termios = termios::get_termios(fd.as_raw_fd())?;
         termios::set_parity(&mut termios, builder.parity);
         termios::set_flow_control(&mut termios, builder.flow_control);
         termios::set_data_bits(&mut termios, builder.data_bits);
@@ -180,11 +180,11 @@ impl TTYPort {
         #[cfg(any(target_os = "ios", target_os = "macos"))]
         termios::set_termios(fd.0, &termios, builder.baud_rate)?;
         #[cfg(not(any(target_os = "ios", target_os = "macos")))]
-        termios::set_termios(fd.0, &termios)?;
+        termios::set_termios(fd.as_raw_fd(), &termios)?;
 
         // Return the final port object
         let mut port = TTYPort {
-            fd: fd.into_raw(),
+            fd: fd.into_raw_fd(),
             timeout: builder.timeout,
             exclusive: true,
             port_name: Some(builder.path.clone()),
@@ -305,20 +305,22 @@ impl TTYPort {
 
         // Set the port to a raw state. Using these ports will not work without this.
         let mut termios = MaybeUninit::uninit();
-        let res = unsafe { crate::posix::tty::libc::tcgetattr(fd, termios.as_mut_ptr()) };
+        let res =
+            unsafe { crate::posix::tty::libc::tcgetattr(fd.as_raw_fd(), termios.as_mut_ptr()) };
         if let Err(e) = nix::errno::Errno::result(res) {
             close(fd);
             return Err(e.into());
         }
         let mut termios = unsafe { termios.assume_init() };
         unsafe { crate::posix::tty::libc::cfmakeraw(&mut termios) };
-        unsafe { crate::posix::tty::libc::tcsetattr(fd, libc::TCSANOW, &termios) };
+        unsafe { crate::posix::tty::libc::tcsetattr(fd.as_raw_fd(), libc::TCSANOW, &termios) };
 
         fcntl(
-            fd,
+            &fd,
             nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::empty()),
         )?;
 
+        let fd = fd.into_raw_fd();
         let slave_tty = TTYPort {
             fd,
             timeout: Duration::from_millis(100),
@@ -332,7 +334,7 @@ impl TTYPort {
         // `tcgetattr()` doesn't work on Mac, Solaris, and maybe other
         // BSDs when used on the master port.
         let master_tty = TTYPort {
-            fd: next_pty_fd.into_raw_fd(),
+            fd,
             timeout: Duration::from_millis(100),
             exclusive: true,
             port_name: None,
@@ -345,9 +347,10 @@ impl TTYPort {
 
     /// Sends 0-valued bits over the port for a set duration
     pub fn send_break(&self, duration: BreakDuration) -> Result<()> {
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(self.fd) };
         match duration {
-            BreakDuration::Short => nix::sys::termios::tcsendbreak(self.fd, 0),
-            BreakDuration::Arbitrary(n) => nix::sys::termios::tcsendbreak(self.fd, n.get()),
+            BreakDuration::Short => nix::sys::termios::tcsendbreak(fd, 0),
+            BreakDuration::Arbitrary(n) => nix::sys::termios::tcsendbreak(fd, n.get()),
         }
         .map_err(|e| e.into())
     }
@@ -367,7 +370,9 @@ impl TTYPort {
     ///
     /// This function returns an error if the serial port couldn't be cloned.
     pub fn try_clone_native(&self) -> Result<TTYPort> {
-        let fd_cloned: i32 = fcntl(self.fd, nix::fcntl::F_DUPFD_CLOEXEC(self.fd))?;
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(self.fd) };
+        let fd_cloned: i32 = fcntl(fd, nix::fcntl::F_DUPFD_CLOEXEC(self.fd))?;
+
         Ok(TTYPort {
             fd: fd_cloned,
             exclusive: self.exclusive,
@@ -396,7 +401,7 @@ impl IntoRawFd for TTYPort {
         // Pull just the file descriptor out. We also prevent the destructor
         // from being run by calling `mem::forget`. If we didn't do this, the
         // port would be closed, which would make `into_raw_fd` unusable.
-        let TTYPort { fd, .. } = self;
+        let fd = self.fd;
         mem::forget(self);
         fd
     }
@@ -433,27 +438,30 @@ impl FromRawFd for TTYPort {
 
 impl io::Read for TTYPort {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if let Err(e) = super::poll::wait_read_fd(self.fd, self.timeout) {
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(self.fd) };
+        if let Err(e) = super::poll::wait_read_fd(&fd, self.timeout) {
             return Err(io::Error::from(Error::from(e)));
         }
 
-        nix::unistd::read(self.fd, buf).map_err(|e| io::Error::from(Error::from(e)))
+        nix::unistd::read(fd, buf).map_err(|e| io::Error::from(Error::from(e)))
     }
 }
 
 impl io::Write for TTYPort {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if let Err(e) = super::poll::wait_write_fd(self.fd, self.timeout) {
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(self.fd) };
+        if let Err(e) = super::poll::wait_write_fd(&fd, self.timeout) {
             return Err(io::Error::from(Error::from(e)));
         }
 
-        nix::unistd::write(self.fd, buf).map_err(|e| io::Error::from(Error::from(e)))
+        nix::unistd::write(fd, buf).map_err(|e| io::Error::from(Error::from(e)))
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(self.fd) };
         let timeout = Instant::now() + self.timeout;
         loop {
-            return match nix::sys::termios::tcdrain(self.fd) {
+            return match nix::sys::termios::tcdrain(&fd) {
                 Ok(_) => Ok(()),
                 Err(nix::errno::Errno::EINTR) => {
                     // Retry flushing. But only up to the ports timeout for not retrying

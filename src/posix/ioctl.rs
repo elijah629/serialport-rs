@@ -1,4 +1,15 @@
-use std::os::unix::io::RawFd;
+#[cfg(any(
+    target_os = "android",
+    all(
+        target_os = "linux",
+        not(any(
+            target_env = "musl",
+            target_arch = "powerpc",
+            target_arch = "powerpc64"
+        ))
+    )
+))]
+use std::os::{fd::AsRawFd, unix::io::RawFd};
 
 use bitflags::bitflags;
 use nix::libc;
@@ -104,21 +115,21 @@ bitflags! {
     }
 }
 
-pub fn tiocexcl(fd: RawFd) -> Result<()> {
-    unsafe { raw::tiocexcl(fd) }
+pub fn tiocexcl<F: AsRawFd>(fd: F) -> Result<()> {
+    unsafe { raw::tiocexcl(fd.as_raw_fd()) }
         .map(|_| ())
         .map_err(|e| e.into())
 }
 
-pub fn tiocnxcl(fd: RawFd) -> Result<()> {
-    unsafe { raw::tiocnxcl(fd) }
+pub fn tiocnxcl<F: AsRawFd>(fd: F) -> Result<()> {
+    unsafe { raw::tiocnxcl(fd.as_raw_fd()) }
         .map(|_| ())
         .map_err(|e| e.into())
 }
 
-pub fn tiocmget(fd: RawFd) -> Result<SerialLines> {
+pub fn tiocmget<F: AsRawFd>(fd: F) -> Result<SerialLines> {
     let mut status: libc::c_int = 0;
-    unsafe { raw::tiocmget(fd, &mut status) }
+    unsafe { raw::tiocmget(fd.as_raw_fd(), &mut status) }
         .map(|_| SerialLines::from_bits_truncate(status))
         .map_err(|e| e.into())
 }
@@ -149,16 +160,16 @@ pub fn tiocoutq(fd: RawFd) -> Result<u32> {
         .map_err(|e| e.into())
 }
 
-pub fn tiocmbic(fd: RawFd, status: SerialLines) -> Result<()> {
+pub fn tiocmbic<F: AsRawFd>(fd: F, status: SerialLines) -> Result<()> {
     let bits = status.bits() as libc::c_int;
-    unsafe { raw::tiocmbic(fd, &bits) }
+    unsafe { raw::tiocmbic(fd.as_raw_fd(), &bits) }
         .map(|_| ())
         .map_err(|e| e.into())
 }
 
-pub fn tiocmbis(fd: RawFd, status: SerialLines) -> Result<()> {
+pub fn tiocmbis<F: AsRawFd>(fd: F, status: SerialLines) -> Result<()> {
     let bits = status.bits() as libc::c_int;
-    unsafe { raw::tiocmbis(fd, &bits) }
+    unsafe { raw::tiocmbis(fd.as_raw_fd(), &bits) }
         .map(|_| ())
         .map_err(|e| e.into())
 }
@@ -174,9 +185,9 @@ pub fn tiocmbis(fd: RawFd, status: SerialLines) -> Result<()> {
         ))
     )
 ))]
-pub fn tcgets2(fd: RawFd) -> Result<libc::termios2> {
+pub fn tcgets2<F: AsRawFd>(fd: F) -> Result<libc::termios2> {
     let mut options = std::mem::MaybeUninit::uninit();
-    match unsafe { raw::tcgets2(fd, options.as_mut_ptr()) } {
+    match unsafe { raw::tcgets2(fd.as_raw_fd(), options.as_mut_ptr()) } {
         Ok(_) => unsafe { Ok(options.assume_init()) },
         Err(e) => Err(e.into()),
     }
@@ -193,8 +204,8 @@ pub fn tcgets2(fd: RawFd) -> Result<libc::termios2> {
         ))
     )
 ))]
-pub fn tcsets2(fd: RawFd, options: &libc::termios2) -> Result<()> {
-    unsafe { raw::tcsets2(fd, options) }
+pub fn tcsets2<F: AsRawFd>(fd: F, options: &libc::termios2) -> Result<()> {
+    unsafe { raw::tcsets2(fd.as_raw_fd(), options) }
         .map(|_| ())
         .map_err(|e| e.into())
 }

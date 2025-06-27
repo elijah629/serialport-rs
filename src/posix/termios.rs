@@ -92,7 +92,7 @@ pub(crate) fn get_termios(fd: RawFd) -> Result<Termios> {
         ))
     )
 ))]
-pub(crate) fn get_termios(fd: RawFd) -> Result<Termios> {
+pub(crate) fn get_termios<F: AsRawFd>(fd: F) -> Result<Termios> {
     crate::posix::ioctl::tcgets2(fd)
 }
 
